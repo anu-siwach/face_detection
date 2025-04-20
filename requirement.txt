@@ -1,0 +1,12 @@
+opencv-python
+dlib
+torch
+torchvision
+transformers
+huggingface_hub
+numpy
+matplotlib
+streamlit
+fer
+pandas
+pillow
