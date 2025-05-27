@@ -10,3 +10,4 @@ streamlit
 fer
 pandas
 pillow
+moviepy

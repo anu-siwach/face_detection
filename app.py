@@ -1,44 +1,79 @@
 import streamlit as st
 import numpy as np
-import cv2, torch
+import cv2
 from PIL import Image
+import torch
 from transformers import BlipProcessor, BlipForConditionalGeneration
 from fer import FER
-import dlib
 
-# Load models
-detector = dlib.get_frontal_face_detector()
-emotion_detector = FER()
+# Face detector
+face_net = cv2.dnn.readNetFromCaffe("deploy.prototxt",
+                                    "res10_300x300_ssd_iter_140000.caffemodel")
+
+# Caption model
 processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+model     = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 
-st.title("🔍 AI Face Analyzer")
-uploaded = st.file_uploader("Upload an image", type=["jpg", "png", "jpeg"])
+# Emotion detector
+fer_detector = FER()
 
-if uploaded:
-    image = Image.open(uploaded).convert("RGB")
-    img_np = np.array(image)
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    faces = detector(gray)
+st.title("Face Analyzer")
 
-    if faces:
-        for face in faces:
-            x, y, w, h = face.left(), face.top(), face.width(), face.height()
-            crop = img_np[y:y+h, x:x+w]
-            face_pil = Image.fromarray(crop)
+uploaded = st.file_uploader("Upload an image", type=["jpg","png","jpeg"])
+if not uploaded:
+    st.info("Upload a file to proceed.")
+    st.stop()
 
-            inputs = processor(images=face_pil, return_tensors="pt")
-            with torch.no_grad():
-                caption = model.generate(**inputs)
-            description = processor.decode(caption[0], skip_special_tokens=True)
+image = Image.open(uploaded).convert("RGB")
+img_np = np.array(image)
+st.image(image, use_container_width=True)
 
-            emotion_result = emotion_detector.detect_emotions(crop)
-            emotion = max(emotion_result[0]["emotions"], key=emotion_result[0]["emotions"].get) if emotion_result else "Neutral"
+# Detect faces
+h, w = img_np.shape[:2]
+blob = cv2.dnn.blobFromImage(img_np, 1.0, (300,300), (104,177,123))
+face_net.setInput(blob)
+dets = face_net.forward()
 
-            st.image(image, caption="Uploaded", use_column_width=True)
-            st.subheader("Description:")
-            st.write(description)
-            st.subheader("Emotion:")
-            st.write(emotion)
-    else:
-        st.error("No face detected.")
+# Take highest-confidence face
+best = max(
+    ((d[2], (d[3:7]*[w,h,w,h]).astype(int)) for d in dets[0,0]),
+    key=lambda x: x[0]
+)
+conf, box = best
+if conf < 0.5:
+    st.error("No face with high-enough confidence detected.")
+    st.stop()
+
+x1,y1,x2,y2 = box
+# expand margin
+dx,dy = int(0.1*(x2-x1)), int(0.1*(y2-y1))
+x1,y1 = max(0,x1-dx), max(0,y1-dy)
+x2,y2 = min(w,x2+dx), min(h,y2+dy)
+
+crop = img_np[y1:y2, x1:x2]
+face_pil = Image.fromarray(crop)
+
+# Caption
+inputs = processor(images=face_pil, return_tensors="pt")
+cap_ids = model.generate(**inputs,
+                         num_beams=5,
+                         no_repeat_ngram_size=2,
+                         top_p=0.9,
+                         temperature=0.8,
+                         max_new_tokens=50)
+description = processor.decode(cap_ids[0], skip_special_tokens=True).capitalize()
+
+# Emotion (FER only)
+fer_res = fer_detector.detect_emotions(crop)
+if fer_res:
+    emotions = fer_res[0]["emotions"]
+    top_emotion = max(emotions, key=emotions.get)
+    emotion = top_emotion.capitalize()
+else:
+    emotion = "Neutral"
+
+# Display
+st.subheader("Detected Face")
+st.image(face_pil, width=300)
+st.markdown(f"**Description:** {description}")
+st.markdown(f"**Emotion:** {emotion}")
